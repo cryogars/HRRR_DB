@@ -1,9 +1,10 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import dask
 import dask.dataframe as dd
 import numcodecs as ncd
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import s3fs
 import xarray as xr
@@ -14,13 +15,35 @@ from .hrrr_url import HRRRUrl
 
 
 class HRRR:
+    """
+    Interface to HRRR stored on AWS S3 as Zarr files.
+
+    Much of this code credit goes to:
+    https://mesowest.utah.edu/html/hrrr/zarr_documentation/html/python_data_loading.html
+    """
     FILE_SYSTEM = s3fs.S3FileSystem(anon=True)
+    ZARR_CHUNK_SHAPE_X = 150
+    ZARR_CHUNK_SHAPE_Y = 150
 
-    def __init__(self, debug=False):
+    def __init__(self, debug: bool = False):
+        """
+        :param debug: Print out debugging information. Default: False
+        :type debug: bool
+        """
         self._debug = debug
+        self._point_chunk_info = None
 
-    def load_dataset(self, variable):
-        hrrr_url = HRRRUrl(variable, None)
+    def load_dataset(self, variable: VariableInfo) -> xr.Dataset:
+        """
+        Get entire HRRR chunk for given variable.
+
+        :param variable: Variable to get HRRR chunk for
+        :type variable: VariableInfo
+
+        :return: HRRR chunk for given variable
+        :rtype: xr.Dataset
+        """
+        hrrr_url = HRRRUrl(variable)
 
         if self._debug:
             print(hrrr_url.s3_subgroup_url())
@@ -42,7 +65,23 @@ class HRRR:
         ds = ds.metpy.assign_crs(HRRRGrid.CRS.to_cf())
         return ds.metpy.assign_latitude_longitude()
 
-    def load_tile(self, variable, forecast_hour=None):
+    def load_tile(
+        self, variable: VariableInfo, forecast_hour: int = None
+    ) -> npt.NDArray:
+        """
+        Load a tile directly from S3 for given variable.
+
+        This method omits the use of Xarray and manually decompresses the
+        Zarr data.
+
+        :param variable: HRRR Variable to get
+        :type variable: VariableInfo
+        :param forecast_hour: HRRR forecast hour
+        :type forecast_hour: int
+
+        :return: HRRR variable values as array
+        :rtype: npt.NDArray
+        """
         s3_url = HRRRUrl(variable, self._point_chunk_info).s3_chunk_url()
 
         if self._debug:
@@ -57,13 +96,23 @@ class HRRR:
 
             chunk = np.frombuffer(buffer, dtype=dtype)
 
-            entry_size = 150*150
+            entry_size = self.ZARR_CHUNK_SHAPE_Y * self.ZARR_CHUNK_SHAPE_X
             num_entries = len(chunk)//entry_size
 
             if num_entries == 1:  # analysis file is 2d
-                data_array = np.reshape(chunk, (150, 150))
+                data_array = np.reshape(
+                    chunk,
+                    (self.ZARR_CHUNK_SHAPE_Y, self.ZARR_CHUNK_SHAPE_X)
+                )
             else:
-                data_array = np.reshape(chunk, (num_entries, 150, 150))
+                data_array = np.reshape(
+                    chunk,
+                    (
+                        num_entries,
+                        self.ZARR_CHUNK_SHAPE_Y,
+                        self.ZARR_CHUNK_SHAPE_X
+                    )
+                )
 
         if forecast_hour is not None:
             # Translate forecast hour to array index (base 0)
@@ -80,11 +129,26 @@ class HRRR:
         return data_array
 
     def surface_variable_for_date_range(
-            self, start_date, end_date, forecast_hour, variable
-    ):
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        forecast_hour: int,
+        variable: str
+    ) -> dask.dataframe.DataFrame:
         """
-        Dask data frame containing the values for the given variable in the
-        requested date range
+        Dask data frame variable values in the requested date range
+
+        :param start_date: Start date
+        :type start_date: datetime
+        :param end_date: End date
+        :type end_date: datetime
+        :param forecast_hour: HRRR forecast hour
+        :type forecast_hour: int
+        :param variable: HRRR variable name
+        :type variable: str
+
+        :return: Dask dataframe with date as index
+        :rtype: dask.dataframe.DataFrame
         """
         total_hours = (end_date - start_date).seconds // 3600
         date_range = [
@@ -98,11 +162,23 @@ class HRRR:
         ).compute()
 
     @dask.delayed
-    def surface_variable_for_date(self, date, forecast_hour, variable):
+    def surface_variable_for_date(
+        self, date: datetime, forecast_hour: int, variable: str
+    ) -> dask.delayed:
         """
         Construct a pandas data frame using the date as index and the variable
-        as value column. This method is designed for use as a Dask
-        data frame with parallelized loading.
+        as value column. This method is designed for use as a Dask data frame
+        with parallelized loading.
+
+        :param date: Requested date
+        :type date: datetime
+        :param forecast_hour: HRRR forecast hour
+        :type forecast_hour: int
+        :param variable: HRRR variable name
+        :type variable: str
+
+        :return: Dask delayed function to load the pandas data frame.
+        :rtype: dask.delayed
         """
 
         var_info = VariableInfo(
@@ -116,9 +192,16 @@ class HRRR:
             data=[value], index=[forecast_date], columns=[variable]
         )
 
-    def set_chunk_info_for_lon_lat(self, lon, lat):
+    def set_chunk_info_for_lon_lat(self, lon: float, lat: float):
         """
-        Convert Lon/Lat into chunk coordinates
+        Convert given Lon/Lat into HRRR chunk coordinates
+
+        This stores the chunk coordinates as an instance attribute.
+
+        :param lon: Point longitude
+        :type lon: float
+        :param lat: Point Latitude
+        :type lat: float
         """
         enclosing_tile = HRRRGrid.chunk_info_for_lon_lat(lon, lat)
 
