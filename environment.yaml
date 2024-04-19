@@ -1,4 +1,4 @@
-name: HRRR-s3
+name: HRRR-db
 channels:
 - pyviz
 - conda-forge
