@@ -161,3 +161,4 @@ cython_debug/
 # DBeaver
 .dbeaver/
 *.project
+sql/Scripts/Script.sql
