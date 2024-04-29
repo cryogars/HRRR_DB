@@ -9,6 +9,7 @@ dependencies:
 - cfgrib
 - dask
 - dask-expr
+- geoalchemy2
 - graphviz
 - holoviews
 - hvplot
